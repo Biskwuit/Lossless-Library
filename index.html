@@ -1,0 +1,115 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Ajouter une chanson</title>
+</head>
+<body>
+
+    <h1>Ajouter une chanson au JSON</h1>
+
+    <label>Titre de la chanson :</label><br>
+    <input type="text" id="song"><br><br>
+
+    <label>Artiste :</label><br>
+    <input type="text" id="artist"><br><br>
+
+    <label>URL du fichier :</label><br>
+    <input type="text" id="url"><br><br>
+
+    <button onclick="ajouterEntree()">Send</button>
+
+    <p id="status"></p>
+
+    <script>
+        // Configuration - à adapter
+        const owner = "Biskwuit";
+        const repo = "Lossless-Library";
+        const path = "music.json"; // chemin vers ton fichier json dans le repo
+        const branch = "main"; // ou "master" selon ton repo
+
+        // Demande le token à chaque chargement (plus sûr que de le coder en dur)
+        let token = prompt("Entre ton GitHub Personal Access Token :");
+
+        async function ajouterEntree() {
+            const song = document.getElementById("song").value;
+            const artist = document.getElementById("artist").value;
+            const url = document.getElementById("url").value;
+
+            if (!song || !artist || !url) {
+                document.getElementById("status").innerText = "Remplis tous les champs !";
+                return;
+            }
+
+            document.getElementById("status").innerText = "Chargement...";
+
+            try {
+                // 1. Récupérer le fichier actuel
+                const getResponse = await fetch(
+                    `https://api.github.com/repos/${owner}/${repo}/contents/${path}?ref=${branch}`,
+                    {
+                        headers: {
+                            "Authorization": `token ${token}`,
+                            "Accept": "application/vnd.github.v3+json"
+                        }
+                    }
+                );
+
+                if (!getResponse.ok) {
+                    throw new Error("Erreur lors de la récupération du fichier");
+                }
+
+                const fileData = await getResponse.json();
+                const sha = fileData.sha;
+
+                // Décoder le contenu base64
+                const content = decodeURIComponent(escape(atob(fileData.content)));
+                const jsonData = JSON.parse(content);
+
+                // 2. Ajouter la nouvelle entrée
+                jsonData.items.push({
+                    song: song,
+                    artist: artist,
+                    url: url
+                });
+
+                // 3. Encoder en base64
+                const newContent = btoa(unescape(encodeURIComponent(JSON.stringify(jsonData, null, 2))));
+
+                // 4. Envoyer la mise à jour
+                const putResponse = await fetch(
+                    `https://api.github.com/repos/${owner}/${repo}/contents/${path}`,
+                    {
+                        method: "PUT",
+                        headers: {
+                            "Authorization": `token ${token}`,
+                            "Accept": "application/vnd.github.v3+json",
+                            "Content-Type": "application/json"
+                        },
+                        body: JSON.stringify({
+                            message: `Ajout de "${song}" par ${artist}`,
+                            content: newContent,
+                            sha: sha,
+                            branch: branch
+                        })
+                    }
+                );
+
+                if (!putResponse.ok) {
+                    const errorData = await putResponse.json();
+                    throw new Error(errorData.message || "Erreur lors de l'envoi");
+                }
+
+                document.getElementById("status").innerText = "✅ Ajouté avec succès !";
+                document.getElementById("song").value = "";
+                document.getElementById("artist").value = "";
+                document.getElementById("url").value = "";
+
+            } catch (error) {
+                document.getElementById("status").innerText = "❌ Erreur : " + error.message;
+                console.error(error);
+            }
+        }
+    </script>
+
+</body>
+</html>
