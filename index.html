@@ -113,7 +113,7 @@
         return { json: JSON.parse(content), sha: data.sha };
     }
 
-    async function saveFileData(json, sha, commitMessage) {
+    async function saveFileDataWithSha(json, sha, commitMessage) {
         const token = getToken();
         const content = btoa(unescape(encodeURIComponent(JSON.stringify(json, null, 2))));
         const res = await fetch(`https://api.github.com/repos/${owner}/${repo}/contents/${path}`, {
@@ -133,7 +133,8 @@
             const errText = await res.text();
             throw new Error("Erreur lors de l'écriture du fichier JSON : " + errText);
         }
-        return res.json();
+        const responseData = await res.json();
+        return responseData.content.sha; // Retourne le nouveau SHA
     }
 
     function isDuplicate(json, title, artist) {
@@ -156,7 +157,7 @@
             url: fileUrl
         });
 
-        await saveFileData(json, sha, `Ajout : ${title} - ${artist}`);
+        await saveFileDataWithSha(json, sha, `Ajout : ${title} - ${artist}`);
     }
 
     // ---------- Catbox uploads ----------
@@ -440,14 +441,27 @@
         cancelBtn.style.display = "inline-block";
         updateBulkProgress(0, rows.length);
 
-        logBulk(`Import de ${rows.length} musiques...`);
+        logBulk(`📦 Import de ${rows.length} musiques...`);
+        logBulk(`📖 Lecture du fichier JSON depuis GitHub...`);
 
-        // On récupère le JSON une seule fois au début pour vérifier les doublons localement,
-        // mais on relit/réécrit à chaque ajout pour éviter les conflits de sha.
+        // === LECTURE UNIQUE DU FICHIER AU DÉBUT ===
+        let fileData;
+        try {
+            fileData = await getFileData();
+        } catch (err) {
+            logBulk(`❌ Impossible de lire music.json : ${err.message}`);
+            cancelBtn.style.display = "none";
+            return;
+        }
+
+        let currentJson = fileData.json;
+        let currentSha = fileData.sha;
         let processed = 0;
         let added = 0;
         let skipped = 0;
         let failed = 0;
+
+        logBulk(`✅ Fichier lu (SHA: ${currentSha.substring(0, 7)}...)`);
 
         for (const row of rows) {
             if (bulkCancelled) {
@@ -462,30 +476,29 @@
             processed++;
 
             if (!title || !artist) {
-                logBulk(`⚠️ Ligne ignorée (titre/artiste manquant) : ${JSON.stringify(row)}`);
+                logBulk(`⚠️ Ligne ${processed} ignorée (titre/artiste manquant)`);
                 skipped++;
                 updateBulkProgress(processed, rows.length);
                 continue;
             }
 
             try {
-                // Vérification anti-doublon avant de faire tout le travail
-                const { json } = await getFileData();
-                if (isDuplicate(json, title, artist)) {
+                // Vérification anti-doublon sur la copie en mémoire
+                if (isDuplicate(currentJson, title, artist)) {
                     logBulk(`⏭️ Doublon ignoré : "${title}" - "${artist}"`);
                     skipped++;
                     updateBulkProgress(processed, rows.length);
                     continue;
                 }
 
-                logBulk(`🔎 Recherche de "${title}" - "${artist}"...`);
+                logBulk(`🔎 [${processed}] Recherche : "${title}" - "${artist}"`);
                 const searchRes = await fetch(CORS_PROXY + `${addonBaseUrl}/search?q=${encodeURIComponent(title + " " + artist)}`);
                 if (!searchRes.ok) throw new Error("Recherche échouée (status " + searchRes.status + ")");
                 const searchData = await searchRes.json();
                 const tracks = searchData.tracks || [];
 
                 if (tracks.length === 0) {
-                    logBulk(`❌ Aucun résultat trouvé pour "${title}" - "${artist}"`);
+                    logBulk(`❌ [${processed}] Aucun résultat pour "${title}" - "${artist}"`);
                     failed++;
                     updateBulkProgress(processed, rows.length);
                     continue;
@@ -493,19 +506,39 @@
 
                 const bestMatch = tracks[0];
 
-                logBulk(`🔗 Résolution du stream pour "${bestMatch.title}"...`);
+                logBulk(`🔗 [${processed}] Résolution du stream : "${bestMatch.title}"`);
                 const streamUrl = await resolveStreamUrl(bestMatch.id);
 
-                logBulk(`⬆️ Upload sur Catbox...`);
+                logBulk(`⬆️ [${processed}] Upload sur Catbox...`);
                 const catboxUrl = await uploadCatboxByUrl(streamUrl);
 
-                logBulk(`💾 Ajout au JSON...`);
-                await addEntry(title, artist, catboxUrl);
+                // Ajout dans la copie mémoire
+                currentJson.items.push({
+                    song: title,
+                    artist: artist,
+                    url: catboxUrl
+                });
 
-                logBulk(`✅ Ajouté : "${title}" - "${artist}"`);
+                logBulk(`💾 [${processed}] Écriture sur GitHub...`);
+                const newSha = await saveFileDataWithSha(currentJson, currentSha, `Ajout bulk : ${title} - ${artist}`);
+                currentSha = newSha; // Mise à jour du SHA pour la prochaine écriture
+
+                logBulk(`✅ [${processed}] Ajouté : "${title}" - "${artist}" (nouveau SHA: ${newSha.substring(0, 7)}...)`);
                 added++;
             } catch (err) {
-                logBulk(`❌ Erreur pour "${title}" - "${artist}" : ${err.message}`);
+                logBulk(`❌ [${processed}] Erreur pour "${title}" - "${artist}" : ${err.message}`);
+                // En cas d'erreur d'écriture (conflit SHA), on relit le fichier pour se resynchroniser
+                if (err.message.includes("409") || err.message.includes("does not match")) {
+                    try {
+                        logBulk(`🔄 Resynchronisation du SHA...`);
+                        const refreshed = await getFileData();
+                        currentJson = refreshed.json;
+                        currentSha = refreshed.sha;
+                        logBulk(`✅ Resynchronisé (SHA: ${currentSha.substring(0, 7)}...)`);
+                    } catch (refreshErr) {
+                        logBulk(`❌ Échec de la resynchronisation : ${refreshErr.message}`);
+                    }
+                }
                 failed++;
             }
 
