@@ -41,7 +41,7 @@
             formData.append("reqtype", "fileupload");
             formData.append("fileToUpload", file);
 
-            const response = await fetch("https://av-eu.startpage.com/__av/aHR0cHM6Ly9jYXRib3gubW9lL3VzZXIvYXBpLnBocA==", {
+            const response = await fetch("https://api.cors.lol/?url=https://catbox.moe/user/api.php", {
                 method: "POST",
                 body: formData
             });
