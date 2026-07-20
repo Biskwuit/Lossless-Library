@@ -1,0 +1,142 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+    <meta charset="UTF-8">
+    <title>Statut des services</title>
+</head>
+<body>
+
+    <h1>Statut des services</h1>
+
+    <button onclick="checkAllServices()">Rafraîchir</button>
+
+    <table border="1" cellpadding="8" id="services-table">
+        <thead>
+            <tr>
+                <th>Nom</th>
+                <th>URL</th>
+                <th>Statut</th>
+                <th>Code HTTP</th>
+                <th>Temps de réponse</th>
+            </tr>
+        </thead>
+        <tbody id="services-body">
+            <!-- Rempli dynamiquement -->
+        </tbody>
+    </table>
+
+    <script>
+        // ==========================
+        // Configuration
+        // ==========================
+
+        // URL de base de votre proxy CORS
+        // Le proxy sera préfixé devant chaque URL de service à tester
+        const CORS_PROXY_URL = "https://cors.zizicabane.stream/";
+
+        // Chemin vers le fichier JSON contenant la liste des services
+        const SERVICES_JSON_PATH = "services.json";
+
+        let servicesData = [];
+
+        // ==========================
+        // Chargement des services
+        // ==========================
+        async function loadServices() {
+            try {
+                const response = await fetch(SERVICES_JSON_PATH);
+                if (!response.ok) {
+                    throw new Error(`Erreur HTTP ${response.status}`);
+                }
+                servicesData = await response.json();
+                initServices(servicesData);
+            } catch (error) {
+                console.error('Erreur lors du chargement de services.json :', error);
+                document.getElementById('services-body').innerHTML =
+                    `<tr><td colspan="5">Impossible de charger services.json</td></tr>`;
+            }
+        }
+
+        function initServices(services) {
+            const tbody = document.getElementById('services-body');
+            tbody.innerHTML = '';
+
+            services.forEach((service, index) => {
+                const row = document.createElement('tr');
+                row.id = `service-row-${index}`;
+                row.innerHTML = `
+                    <td>${service.name}</td>
+                    <td>${service.url}</td>
+                    <td id="status-${index}">⏳ En attente...</td>
+                    <td id="code-${index}">-</td>
+                    <td id="time-${index}">-</td>
+                `;
+                tbody.appendChild(row);
+            });
+
+            checkAllServices();
+        }
+
+        // ==========================
+        // Vérification d'un service
+        // ==========================
+        async function checkService(service, index) {
+            const statusCell = document.getElementById(`status-${index}`);
+            const codeCell = document.getElementById(`code-${index}`);
+            const timeCell = document.getElementById(`time-${index}`);
+
+            statusCell.textContent = '⏳ Vérification...';
+            codeCell.textContent = '-';
+            timeCell.textContent = '-';
+
+            const startTime = performance.now();
+
+            // On passe par le proxy CORS
+            const proxiedUrl = CORS_PROXY_URL + encodeURIComponent(service.url);
+
+            try {
+                const response = await fetch(proxiedUrl, {
+                    method: 'GET',
+                    cache: 'no-cache'
+                });
+
+                const endTime = performance.now();
+                const duration = Math.round(endTime - startTime);
+
+                if (response.ok) {
+                    statusCell.textContent = '✅ En ligne';
+                } else {
+                    statusCell.textContent = '⚠️ Erreur';
+                }
+
+                codeCell.textContent = response.status;
+                timeCell.textContent = `${duration} ms`;
+
+            } catch (error) {
+                const endTime = performance.now();
+                const duration = Math.round(endTime - startTime);
+
+                statusCell.textContent = '❌ Hors ligne';
+                codeCell.textContent = '-';
+                timeCell.textContent = `${duration} ms (échec)`;
+                console.error(`Erreur pour ${service.name} :`, error);
+            }
+        }
+
+        function checkAllServices() {
+            servicesData.forEach((service, index) => {
+                checkService(service, index);
+            });
+        }
+
+        // ==========================
+        // Initialisation
+        // ==========================
+        window.addEventListener('DOMContentLoaded', loadServices);
+
+        // Rafraîchissement automatique toutes les 30 secondes
+        setInterval(checkAllServices, 30000);
+    </script>
+
+</body>
+</html>
