@@ -92,7 +92,7 @@
             const startTime = performance.now();
 
             // On passe par le proxy CORS
-            const proxiedUrl = CORS_PROXY_URL + encodeURIComponent(service.url);
+            const proxiedUrl = CORS_PROXY_URL + service.url;
 
             try {
                 const response = await fetch(proxiedUrl, {
