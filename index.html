@@ -1,208 +1,266 @@
 <!DOCTYPE html>
-<html>
+<html lang="fr">
 <head>
-    <title>Gestionnaire de chansons</title>
+<meta charset="UTF-8">
+<title>Lossless Library Editor</title>
 </head>
 <body>
 
-    <h1>Ajouter une chanson au JSON</h1>
+<h1>Ajouter une musique</h1>
 
-    <label>Titre de la chanson :</label><br>
-    <input type="text" id="song"><br><br>
+<h2>1. Ajout manuel</h2>
+<label>Titre : <input id="song" type="text"></label><br><br>
+<label>Artiste : <input id="artist" type="text"></label><br><br>
+<label>URL FLAC : <input id="url" type="text"></label><br><br>
+<label>Ou upload fichier FLAC : <input id="fileInput" type="file" accept=".flac"></label><br><br>
+<button onclick="submitEntry()">Send</button>
 
-    <label>Artiste :</label><br>
-    <input type="text" id="artist"><br><br>
+<p id="status"></p>
 
-    <label>Fichier FLAC :</label><br>
-    <input type="file" id="fileInput" accept=".flac"><br><br>
+<hr>
 
-    <button onclick="ajouterEntree()">Send</button>
+<h2>2. Auto-download via addon Eclipse</h2>
+<label>URL du manifest.json de l'addon : <input id="manifestUrl" type="text" size="60" placeholder="https://mon-addon.com/manifest.json"></label>
+<button onclick="loadManifest()">Charger l'addon</button>
+<p id="manifestStatus"></p>
 
-    <p id="status"></p>
+<br>
+<label>Recherche : <input id="searchQuery" type="text"></label>
+<button onclick="searchAddon()">Chercher</button>
 
-    <hr>
+<div id="searchResults"></div>
 
-    <h2>Liste des chansons</h2>
-    <button onclick="chargerListe()">🔄 Rafraîchir la liste</button>
-    <div id="liste"></div>
+<p id="autoStatus"></p>
 
-    <script>
-        // Configuration du repo
-        const owner = "Biskwuit";
-        const repo = "Lossless-Library";
-        const path = "music.json";
-        const branch = "main";
+<script>
+    const owner = "Biskwuit";
+    const repo = "Lossless-Library";
+    const path = "music.json";
+    const branch = "main";
 
-        let token = prompt("Entre ton GitHub Personal Access Token :");
+    const CORS_PROXY = "https://cors.zizicabane.stream/";
 
-        // Upload le fichier sur Catbox et retourne l'URL
-        async function uploadCatbox(file) {
-            const formData = new FormData();
-            formData.append("reqtype", "fileupload");
-            formData.append("fileToUpload", file);
+    let githubToken = "";
+    let addonBaseUrl = "";
 
-            const response = await fetch("https://cors.zizicabane.stream/https://catbox.moe/user/api.php", {
-                method: "POST",
-                body: formData
-            });
+    function getToken() {
+        if (!githubToken) {
+            githubToken = prompt("Entre ton GitHub Personal Access Token :");
+        }
+        return githubToken;
+    }
 
-            if (!response.ok) {
-                throw new Error("Erreur lors de l'upload sur Catbox");
-            }
+    // ---------- GitHub JSON helpers ----------
 
-            const url = await response.text();
+    async function getFile() {
+        const res = await fetch(`https://api.github.com/repos/${owner}/${repo}/contents/${path}?ref=${branch}`, {
+            headers: { Authorization: `token ${getToken()}` }
+        });
+        if (!res.ok) throw new Error("Erreur lors de la lecture du fichier JSON");
+        const data = await res.json();
+        const content = JSON.parse(atob(data.content));
+        return { content, sha: data.sha };
+    }
 
-            if (!url.startsWith("http")) {
-                throw new Error("Réponse Catbox invalide : " + url);
-            }
+    async function updateFile(newContent, sha, message) {
+        const res = await fetch(`https://api.github.com/repos/${owner}/${repo}/contents/${path}`, {
+            method: "PUT",
+            headers: {
+                Authorization: `token ${getToken()}`,
+                "Content-Type": "application/json"
+            },
+            body: JSON.stringify({
+                message: message || "Ajout d'une entrée via l'interface web",
+                content: btoa(unescape(encodeURIComponent(JSON.stringify(newContent, null, 2)))),
+                sha: sha,
+                branch: branch
+            })
+        });
+        if (!res.ok) {
+            const err = await res.text();
+            throw new Error("Erreur lors de la mise à jour du fichier JSON : " + err);
+        }
+        return res.json();
+    }
 
-            return url.trim();
+    async function addEntry(song, artist, url) {
+        const { content, sha } = await getFile();
+        content.items.push({ song, artist, url });
+        await updateFile(content, sha, `Ajout: ${song} - ${artist}`);
+    }
+
+    // ---------- Catbox uploads ----------
+
+    async function uploadCatboxFile(file) {
+        const formData = new FormData();
+        formData.append("reqtype", "fileupload");
+        formData.append("fileToUpload", file);
+
+        const response = await fetch(CORS_PROXY + "https://catbox.moe/user/api.php", {
+            method: "POST",
+            body: formData
+        });
+
+        if (!response.ok) throw new Error("Erreur lors de l'upload sur Catbox (status " + response.status + ")");
+
+        const url = await response.text();
+        if (!url.startsWith("http")) throw new Error("Réponse Catbox invalide : " + url);
+        return url.trim();
+    }
+
+    async function uploadCatboxByUrl(sourceUrl) {
+        const formData = new FormData();
+        formData.append("reqtype", "urlupload");
+        formData.append("url", sourceUrl);
+
+        const response = await fetch(CORS_PROXY + "https://catbox.moe/user/api.php", {
+            method: "POST",
+            body: formData
+        });
+
+        if (!response.ok) throw new Error("Erreur lors de l'upload sur Catbox (status " + response.status + ")");
+
+        const url = await response.text();
+        if (!url.startsWith("http")) throw new Error("Réponse Catbox invalide : " + url);
+        return url.trim();
+    }
+
+    // ---------- Manual add ----------
+
+    async function submitEntry() {
+        const song = document.getElementById("song").value.trim();
+        const artist = document.getElementById("artist").value.trim();
+        let url = document.getElementById("url").value.trim();
+        const file = document.getElementById("fileInput").files[0];
+        const status = document.getElementById("status");
+
+        if (!song || !artist) {
+            status.textContent = "Titre et artiste sont requis.";
+            return;
         }
 
-        // Charge le JSON et retourne { data, sha }
-        async function getFichier() {
-            const response = await fetch(
-                `https://api.github.com/repos/${owner}/${repo}/contents/${path}?ref=${branch}`,
-                {
-                    headers: {
-                        "Authorization": `token ${token}`,
-                        "Accept": "application/vnd.github.v3+json"
-                    }
-                }
-            );
-
-            if (!response.ok) {
-                throw new Error("Erreur lors de la récupération du fichier");
+        try {
+            if (file) {
+                status.textContent = "Upload du fichier en cours...";
+                url = await uploadCatboxFile(file);
             }
 
-            const fileData = await response.json();
-            const content = decodeURIComponent(escape(atob(fileData.content)));
-            const jsonData = JSON.parse(content);
-
-            return { data: jsonData, sha: fileData.sha };
-        }
-
-        // Envoie le nouveau JSON sur GitHub
-        async function sauvegarderFichier(jsonData, sha, message) {
-            const newContent = btoa(unescape(encodeURIComponent(JSON.stringify(jsonData, null, 2))));
-
-            const response = await fetch(
-                `https://api.github.com/repos/${owner}/${repo}/contents/${path}`,
-                {
-                    method: "PUT",
-                    headers: {
-                        "Authorization": `token ${token}`,
-                        "Accept": "application/vnd.github.v3+json",
-                        "Content-Type": "application/json"
-                    },
-                    body: JSON.stringify({
-                        message: message,
-                        content: newContent,
-                        sha: sha,
-                        branch: branch
-                    })
-                }
-            );
-
-            if (!response.ok) {
-                const errorData = await response.json();
-                throw new Error(errorData.message || "Erreur lors de l'envoi");
-            }
-        }
-
-        // Ajoute une entrée (avec upload du fichier)
-        async function ajouterEntree() {
-            const song = document.getElementById("song").value;
-            const artist = document.getElementById("artist").value;
-            const fileInput = document.getElementById("fileInput");
-            const file = fileInput.files[0];
-
-            if (!song || !artist || !file) {
-                document.getElementById("status").innerText = "Remplis tous les champs et choisis un fichier !";
+            if (!url) {
+                status.textContent = "Il faut une URL ou un fichier.";
                 return;
             }
 
-            try {
-                document.getElementById("status").innerText = "⬆️ Upload du fichier sur Catbox...";
-                const url = await uploadCatbox(file);
+            status.textContent = "Ajout de l'entrée au JSON...";
+            await addEntry(song, artist, url);
 
-                document.getElementById("status").innerText = "💾 Mise à jour du JSON...";
-                const { data, sha } = await getFichier();
+            status.textContent = "Ajouté avec succès !";
+            document.getElementById("song").value = "";
+            document.getElementById("artist").value = "";
+            document.getElementById("url").value = "";
+            document.getElementById("fileInput").value = "";
+        } catch (err) {
+            status.textContent = "Erreur : " + err.message;
+            console.error(err);
+        }
+    }
 
-                data.items.push({ song, artist, url });
+    // ---------- Addon (Eclipse) integration ----------
 
-                await sauvegarderFichier(data, sha, `Ajout de "${song}" par ${artist}`);
+    async function loadManifest() {
+        const manifestStatus = document.getElementById("manifestStatus");
+        let url = document.getElementById("manifestUrl").value.trim();
 
-                document.getElementById("status").innerText = "✅ Ajouté avec succès !";
-                document.getElementById("song").value = "";
-                document.getElementById("artist").value = "";
-                fileInput.value = "";
-
-                chargerListe();
-
-            } catch (error) {
-                document.getElementById("status").innerText = "❌ Erreur : " + error.message;
-                console.error(error);
-            }
+        if (!url) {
+            manifestStatus.textContent = "Entre une URL de manifest.";
+            return;
         }
 
-        // Supprime une entrée par son index
-        async function supprimerEntree(index) {
-            if (!confirm("Supprimer cette chanson ?")) return;
+        try {
+            manifestStatus.textContent = "Chargement...";
 
-            document.getElementById("status").innerText = "Suppression...";
+            // On dérive la base URL en retirant /manifest.json à la fin
+            addonBaseUrl = url.replace(/\/manifest\.json\/?$/, "");
 
-            try {
-                const { data, sha } = await getFichier();
+            const res = await fetch(CORS_PROXY + url);
+            if (!res.ok) throw new Error("Impossible de charger le manifest (status " + res.status + ")");
+            const manifest = await res.json();
 
-                const suppr = data.items[index];
-                data.items.splice(index, 1);
-
-                await sauvegarderFichier(data, sha, `Suppression de "${suppr.song}"`);
-
-                document.getElementById("status").innerText = "✅ Supprimé avec succès !";
-                chargerListe();
-
-            } catch (error) {
-                document.getElementById("status").innerText = "❌ Erreur : " + error.message;
-                console.error(error);
-            }
+            manifestStatus.textContent = `Addon chargé : ${manifest.name} (v${manifest.version})`;
+        } catch (err) {
+            manifestStatus.textContent = "Erreur : " + err.message;
+            console.error(err);
         }
+    }
 
-        // Affiche la liste des chansons
-        async function chargerListe() {
-            document.getElementById("liste").innerHTML = "Chargement...";
+    async function searchAddon() {
+        const query = document.getElementById("searchQuery").value.trim();
+        const resultsDiv = document.getElementById("searchResults");
+        resultsDiv.innerHTML = "";
 
-            try {
-                const { data } = await getFichier();
-
-                if (data.items.length === 0) {
-                    document.getElementById("liste").innerHTML = "Aucune chanson.";
-                    return;
-                }
-
-                let html = "";
-                data.items.forEach((item, index) => {
-                    html += `
-                        <p>
-                            <b>${item.song}</b> - ${item.artist}<br>
-                            <a href="${item.url}" target="_blank">${item.url}</a><br>
-                            <button onclick="supprimerEntree(${index})">🗑️ Supprimer</button>
-                        </p>
-                        <hr>
-                    `;
-                });
-
-                document.getElementById("liste").innerHTML = html;
-
-            } catch (error) {
-                document.getElementById("liste").innerHTML = "❌ Erreur : " + error.message;
-                console.error(error);
-            }
+        if (!addonBaseUrl) {
+            alert("Charge d'abord un addon.");
+            return;
         }
+        if (!query) return;
 
-        chargerListe();
-    </script>
+        try {
+            const res = await fetch(CORS_PROXY + `${addonBaseUrl}/search?q=${encodeURIComponent(query)}`);
+            if (!res.ok) throw new Error("Erreur de recherche (status " + res.status + ")");
+            const data = await res.json();
+
+            const tracks = data.tracks || [];
+            if (tracks.length === 0) {
+                resultsDiv.innerHTML = "<p>Aucun résultat.</p>";
+                return;
+            }
+
+            tracks.forEach(track => {
+                const div = document.createElement("div");
+                div.style = "margin-bottom:10px; padding:8px; border:1px solid #ccc;";
+                div.innerHTML = `
+                    <strong>${track.title}</strong> - ${track.artist}
+                    ${track.album ? " (" + track.album + ")" : ""}
+                    <br>
+                    <button data-id="${track.id}" data-title="${encodeURIComponent(track.title)}" data-artist="${encodeURIComponent(track.artist)}" onclick="autoAdd(this)">
+                        Ajouter automatiquement
+                    </button>
+                `;
+                resultsDiv.appendChild(div);
+            });
+        } catch (err) {
+            resultsDiv.innerHTML = "<p>Erreur : " + err.message + "</p>";
+            console.error(err);
+        }
+    }
+
+    async function autoAdd(button) {
+        const id = button.getAttribute("data-id");
+        const title = decodeURIComponent(button.getAttribute("data-title"));
+        const artist = decodeURIComponent(button.getAttribute("data-artist"));
+        const autoStatus = document.getElementById("autoStatus");
+
+        try {
+            autoStatus.textContent = "Résolution du stream...";
+
+            const res = await fetch(CORS_PROXY + `${addonBaseUrl}/stream/${encodeURIComponent(id)}`);
+            if (!res.ok) throw new Error("Erreur lors de la résolution du stream (status " + res.status + ")");
+            const streamData = await res.json();
+
+            if (!streamData.url) throw new Error("Pas d'URL de stream retournée.");
+
+            autoStatus.textContent = "Upload sur Catbox par URL...";
+            const catboxUrl = await uploadCatboxByUrl(streamData.url);
+
+            autoStatus.textContent = "Ajout au JSON...";
+            await addEntry(title, artist, catboxUrl);
+
+            autoStatus.textContent = `Ajouté avec succès : ${title} - ${artist}`;
+        } catch (err) {
+            autoStatus.textContent = "Erreur : " + err.message;
+            console.error(err);
+        }
+    }
+</script>
 
 </body>
 </html>
