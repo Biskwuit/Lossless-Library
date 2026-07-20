@@ -6,7 +6,7 @@
 </head>
 <body>
 
-<h1>Ajouter une musique</h1>
+<h1>Lossless Library Editor</h1>
 
 <h2>Paramètres</h2>
 <button onclick="clearSavedSettings()">🗑️ Effacer token GitHub + URL manifest sauvegardés</button>
@@ -40,24 +40,18 @@
 
 <hr>
 
-<h2>3. Import en masse (CSV)</h2>
-<p>Format attendu (comme un export Vibes) :</p>
-<pre>Title: Nom de la chanson
-Artist: Nom de l'artiste
-Album: 
-Duration: 135
-URL: https://music.youtube.com/watch?v=xxxx</pre>
+<h2>3. Bulk import depuis CSV</h2>
+<p>Format attendu : <code>Title,Artist,Album,Duration,URL</code> (nécessite l'addon chargé ci-dessus)</p>
+<input id="csvFile" type="file" accept=".csv">
+<button onclick="startBulkImport()">Importer</button>
+<button onclick="cancelBulkImport()" id="cancelBtn" style="display:none;">❌ Annuler</button>
 
-<label>Fichier CSV : <input id="csvFile" type="file" accept=".csv,.txt"></label><br><br>
-
-<button onclick="startBulkImport()">Lancer l'import</button>
-<button onclick="cancelBulkImport()" id="cancelBtn" disabled>Annuler</button>
-
-<div style="margin-top:10px; width:400px; border:1px solid #000;">
-    <div id="progressBar" style="height:20px; width:0%; background:green;"></div>
+<div id="bulkProgressWrapper" style="display:none; margin-top:10px;">
+    <progress id="bulkProgress" value="0" max="100" style="width:300px;"></progress>
+    <span id="bulkProgressText"></span>
 </div>
-<p id="bulkStatus"></p>
-<ul id="bulkLog"></ul>
+
+<div id="bulkLog" style="margin-top:10px; max-height:300px; overflow-y:auto; border:1px solid #ccc; padding:5px;"></div>
 
 <script>
     const owner = "Biskwuit";
@@ -72,9 +66,9 @@ URL: https://music.youtube.com/watch?v=xxxx</pre>
 
     let githubToken = localStorage.getItem(LS_TOKEN_KEY) || "";
     let addonBaseUrl = "";
-    let bulkImportCancelled = false;
+    let bulkCancelled = false;
 
-    // ---------- Init : restaure les valeurs sauvegardées ----------
+    // ---------- Init ----------
 
     window.addEventListener("DOMContentLoaded", () => {
         const savedManifestUrl = localStorage.getItem(LS_MANIFEST_KEY);
@@ -84,6 +78,8 @@ URL: https://music.youtube.com/watch?v=xxxx</pre>
             document.getElementById("manifestStatus").textContent = "URL restaurée depuis le cache local. Clique sur 'Charger l'addon' pour vérifier.";
         }
     });
+
+    // ---------- Token / settings ----------
 
     function getToken() {
         if (!githubToken) {
@@ -101,58 +97,66 @@ URL: https://music.youtube.com/watch?v=xxxx</pre>
         githubToken = "";
         addonBaseUrl = "";
         document.getElementById("manifestUrl").value = "";
-        document.getElementById("settingsStatus").textContent = "Token et URL manifest supprimés du cache local.";
-        document.getElementById("manifestStatus").textContent = "";
+        document.getElementById("settingsStatus").textContent = "Token et URL manifest effacés du cache local.";
     }
 
-    // ---------- GitHub JSON helpers ----------
+    // ---------- GitHub helpers ----------
 
-    async function getFile() {
+    async function getFileData() {
+        const token = getToken();
         const res = await fetch(`https://api.github.com/repos/${owner}/${repo}/contents/${path}?ref=${branch}`, {
-            headers: { Authorization: `token ${getToken()}` }
+            headers: { Authorization: `token ${token}` }
         });
-        if (!res.ok) throw new Error("Erreur lors de la lecture du fichier JSON");
+        if (!res.ok) throw new Error("Erreur lors de la lecture du fichier JSON (status " + res.status + ")");
         const data = await res.json();
-        const content = JSON.parse(atob(data.content));
-        return { content, sha: data.sha };
+        const content = decodeURIComponent(escape(atob(data.content)));
+        return { json: JSON.parse(content), sha: data.sha };
     }
 
-    async function updateFile(newContent, sha, message) {
+    async function saveFileData(json, sha, commitMessage) {
+        const token = getToken();
+        const content = btoa(unescape(encodeURIComponent(JSON.stringify(json, null, 2))));
         const res = await fetch(`https://api.github.com/repos/${owner}/${repo}/contents/${path}`, {
             method: "PUT",
             headers: {
-                Authorization: `token ${getToken()}`,
+                Authorization: `token ${token}`,
                 "Content-Type": "application/json"
             },
             body: JSON.stringify({
-                message: message || "Ajout d'une entrée via l'interface web",
-                content: btoa(unescape(encodeURIComponent(JSON.stringify(newContent, null, 2)))),
+                message: commitMessage || "Ajout d'une musique",
+                content: content,
                 sha: sha,
                 branch: branch
             })
         });
         if (!res.ok) {
-            const err = await res.text();
-            throw new Error("Erreur lors de la mise à jour du fichier JSON : " + err);
+            const errText = await res.text();
+            throw new Error("Erreur lors de l'écriture du fichier JSON : " + errText);
         }
         return res.json();
     }
 
-    function isDuplicate(items, song, artist) {
-        const normalize = s => s.trim().toLowerCase();
-        return items.some(item =>
-            normalize(item.song) === normalize(song) &&
-            normalize(item.artist) === normalize(artist)
+    function isDuplicate(json, title, artist) {
+        return json.items.some(item =>
+            item.song.trim().toLowerCase() === title.trim().toLowerCase() &&
+            item.artist.trim().toLowerCase() === artist.trim().toLowerCase()
         );
     }
 
-    async function addEntry(song, artist, url) {
-        const { content, sha } = await getFile();
-        if (isDuplicate(content.items, song, artist)) {
-            throw new Error("DUPLICATE");
+    async function addEntry(title, artist, fileUrl) {
+        const { json, sha } = await getFileData();
+
+        if (isDuplicate(json, title, artist)) {
+            throw new Error(`Doublon ignoré : "${title}" - "${artist}" existe déjà.`);
         }
-        content.items.push({ song, artist, url });
-        await updateFile(content, sha, `Ajout: ${song} - ${artist}`);
+
+        json.items.push({
+            song: title,
+            artist: artist,
+            url: fileUrl
+        });
+
+        await saveFileData(json, sha, `Ajout : ${title} - ${artist}`);
     }
 
     // ---------- Catbox uploads ----------
@@ -162,99 +166,91 @@ URL: https://music.youtube.com/watch?v=xxxx</pre>
         formData.append("reqtype", "fileupload");
         formData.append("fileToUpload", file);
 
-        const response = await fetch(CORS_PROXY + "https://catbox.moe/user/api.php", {
+        const res = await fetch(CORS_PROXY + "https://catbox.moe/user/api.php", {
             method: "POST",
             body: formData
         });
 
-        if (!response.ok) throw new Error("Erreur lors de l'upload sur Catbox (status " + response.status + ")");
-
-        const url = await response.text();
-        if (!url.startsWith("http")) throw new Error("Réponse Catbox invalide : " + url);
-        return url.trim();
+        if (!res.ok) throw new Error("Erreur lors de l'upload sur Catbox (status " + res.status + ")");
+        const text = await res.text();
+        if (!text.startsWith("http")) throw new Error("Réponse inattendue de Catbox : " + text);
+        return text.trim();
     }
 
-    async function uploadCatboxByUrl(sourceUrl) {
+    async function uploadCatboxByUrl(url) {
         const formData = new FormData();
         formData.append("reqtype", "urlupload");
-        formData.append("url", sourceUrl);
+        formData.append("url", url);
 
-        const response = await fetch(CORS_PROXY + "https://catbox.moe/user/api.php", {
+        const res = await fetch(CORS_PROXY + "https://catbox.moe/user/api.php", {
             method: "POST",
             body: formData
         });
 
-        if (!response.ok) throw new Error("Erreur lors de l'upload sur Catbox (status " + response.status + ")");
-
-        const url = await response.text();
-        if (!url.startsWith("http")) throw new Error("Réponse Catbox invalide : " + url);
-        return url.trim();
+        if (!res.ok) throw new Error("Erreur lors de l'upload par URL sur Catbox (status " + res.status + ")");
+        const text = await res.text();
+        if (!text.startsWith("http")) throw new Error("Réponse inattendue de Catbox : " + text);
+        return text.trim();
     }
 
-    // ---------- Manual add ----------
+    // ---------- Ajout manuel ----------
 
     async function submitEntry() {
-        const song = document.getElementById("song").value.trim();
-        const artist = document.getElementById("artist").value.trim();
-        let url = document.getElementById("url").value.trim();
-        const file = document.getElementById("fileInput").files[0];
         const status = document.getElementById("status");
+        const title = document.getElementById("song").value.trim();
+        const artist = document.getElementById("artist").value.trim();
+        let fileUrl = document.getElementById("url").value.trim();
+        const fileInput = document.getElementById("fileInput");
 
-        if (!song || !artist) {
-            status.textContent = "Titre et artiste sont requis.";
+        if (!title || !artist) {
+            status.textContent = "Titre et artiste requis.";
             return;
         }
 
         try {
-            if (file) {
-                status.textContent = "Upload du fichier en cours...";
-                url = await uploadCatboxFile(file);
+            if (fileInput.files.length > 0) {
+                status.textContent = "Upload du fichier sur Catbox...";
+                fileUrl = await uploadCatboxFile(fileInput.files[0]);
             }
 
-            if (!url) {
-                status.textContent = "Il faut une URL ou un fichier.";
+            if (!fileUrl) {
+                status.textContent = "Aucune URL ni fichier fourni.";
                 return;
             }
 
-            status.textContent = "Ajout de l'entrée au JSON...";
-            await addEntry(song, artist, url);
+            status.textContent = "Ajout au JSON...";
+            await addEntry(title, artist, fileUrl);
 
-            status.textContent = "Ajouté avec succès !";
+            status.textContent = `Ajouté avec succès : ${title} - ${artist}`;
             document.getElementById("song").value = "";
             document.getElementById("artist").value = "";
             document.getElementById("url").value = "";
-            document.getElementById("fileInput").value = "";
+            fileInput.value = "";
         } catch (err) {
-            if (err.message === "DUPLICATE") {
-                status.textContent = "Cette chanson existe déjà dans la bibliothèque.";
-            } else {
-                status.textContent = "Erreur : " + err.message;
-            }
+            status.textContent = "Erreur : " + err.message;
             console.error(err);
         }
     }
 
-    // ---------- Addon (Eclipse) integration ----------
+    // ---------- Addon Eclipse ----------
 
     async function loadManifest() {
         const manifestStatus = document.getElementById("manifestStatus");
-        let url = document.getElementById("manifestUrl").value.trim();
+        const manifestUrlInput = document.getElementById("manifestUrl").value.trim();
 
-        if (!url) {
-            manifestStatus.textContent = "Entre une URL de manifest.";
+        if (!manifestUrlInput) {
+            manifestStatus.textContent = "Merci d'entrer une URL de manifest.";
             return;
         }
 
         try {
-            manifestStatus.textContent = "Chargement...";
-
-            addonBaseUrl = url.replace(/\/manifest\.json\/?$/, "");
-
-            const res = await fetch(CORS_PROXY + url);
+            manifestStatus.textContent = "Chargement du manifest...";
+            const res = await fetch(CORS_PROXY + manifestUrlInput);
             if (!res.ok) throw new Error("Impossible de charger le manifest (status " + res.status + ")");
             const manifest = await res.json();
 
-            localStorage.setItem(LS_MANIFEST_KEY, url);
+            addonBaseUrl = manifestUrlInput.replace(/\/manifest\.json\/?$/, "");
+            localStorage.setItem(LS_MANIFEST_KEY, manifestUrlInput);
 
             manifestStatus.textContent = `Addon chargé : ${manifest.name} (v${manifest.version})`;
         } catch (err) {
@@ -264,19 +260,23 @@ URL: https://music.youtube.com/watch?v=xxxx</pre>
     }
 
     async function searchAddon() {
-        const query = document.getElementById("searchQuery").value.trim();
         const resultsDiv = document.getElementById("searchResults");
-        resultsDiv.innerHTML = "";
+        const query = document.getElementById("searchQuery").value.trim();
 
         if (!addonBaseUrl) {
-            alert("Charge d'abord un addon.");
+            resultsDiv.innerHTML = "<p>Charge d'abord un addon.</p>";
             return;
         }
-        if (!query) return;
+        if (!query) {
+            resultsDiv.innerHTML = "<p>Entre une recherche.</p>";
+            return;
+        }
+
+        resultsDiv.innerHTML = "<p>Recherche en cours...</p>";
 
         try {
             const res = await fetch(CORS_PROXY + `${addonBaseUrl}/search?q=${encodeURIComponent(query)}`);
-            if (!res.ok) throw new Error("Erreur de recherche (status " + res.status + ")");
+            if (!res.ok) throw new Error("Erreur lors de la recherche (status " + res.status + ")");
             const data = await res.json();
 
             const tracks = data.tracks || [];
@@ -285,172 +285,235 @@ URL: https://music.youtube.com/watch?v=xxxx</pre>
                 return;
             }
 
-            tracks.forEach(track => {
-                const div = document.createElement("div");
-                div.style = "margin-bottom:10px; padding:8px; border:1px solid #ccc;";
-                div.innerHTML = `
-                    <strong>${track.title}</strong> - ${track.artist}
-                    ${track.album ? " (" + track.album + ")" : ""}
-                    <br>
-                    <button data-id="${track.id}" data-title="${encodeURIComponent(track.title)}" data-artist="${encodeURIComponent(track.artist)}" onclick="autoAdd(this)">
-                        Ajouter automatiquement
+            resultsDiv.innerHTML = tracks.map(t => `
+                <div style="border:1px solid #ccc; padding:5px; margin:5px 0;">
+                    <strong>${t.title}</strong> - ${t.artist} ${t.format ? "[" + t.format + "]" : ""}
+                    <button
+                        data-id="${encodeURIComponent(t.id)}"
+                        data-title="${encodeURIComponent(t.title)}"
+                        data-artist="${encodeURIComponent(t.artist)}"
+                        onclick="autoAdd(this)">
+                        Ajouter
                     </button>
-                `;
-                resultsDiv.appendChild(div);
-            });
+                </div>
+            `).join("");
         } catch (err) {
             resultsDiv.innerHTML = "<p>Erreur : " + err.message + "</p>";
             console.error(err);
         }
     }
 
+    async function resolveStreamUrl(trackId) {
+        const res = await fetch(CORS_PROXY + `${addonBaseUrl}/stream/${encodeURIComponent(trackId)}`);
+        if (!res.ok) throw new Error("Erreur lors de la résolution du stream (status " + res.status + ")");
+        const streamData = await res.json();
+        if (!streamData.url) throw new Error("Pas d'URL de stream retournée.");
+        return streamData.url;
+    }
+
     async function autoAdd(button) {
-        const id = button.getAttribute("data-id");
+        const id = decodeURIComponent(button.getAttribute("data-id"));
         const title = decodeURIComponent(button.getAttribute("data-title"));
         const artist = decodeURIComponent(button.getAttribute("data-artist"));
         const autoStatus = document.getElementById("autoStatus");
 
         try {
             autoStatus.textContent = "Résolution du stream...";
-
-            const res = await fetch(CORS_PROXY + `${addonBaseUrl}/stream/${encodeURIComponent(id)}`);
-            if (!res.ok) throw new Error("Erreur lors de la résolution du stream (status " + res.status + ")");
-            const streamData = await res.json();
-
-            if (!streamData.url) throw new Error("Pas d'URL de stream retournée.");
+            const streamUrl = await resolveStreamUrl(id);
 
             autoStatus.textContent = "Upload sur Catbox par URL...";
-            const catboxUrl = await uploadCatboxByUrl(streamData.url);
+            const catboxUrl = await uploadCatboxByUrl(streamUrl);
 
             autoStatus.textContent = "Ajout au JSON...";
             await addEntry(title, artist, catboxUrl);
 
             autoStatus.textContent = `Ajouté avec succès : ${title} - ${artist}`;
         } catch (err) {
-            if (err.message === "DUPLICATE") {
-                autoStatus.textContent = "Cette chanson existe déjà dans la bibliothèque.";
-            } else {
-                autoStatus.textContent = "Erreur : " + err.message;
-            }
+            autoStatus.textContent = "Erreur : " + err.message;
             console.error(err);
         }
     }
 
-    // ---------- Bulk CSV import ----------
+    // ---------- Bulk import CSV ----------
 
-    function parseVibesCSV(text) {
-        // Format: blocs "Title: ...\nArtist: ...\nAlbum: ...\nDuration: ...\nURL: ..." collés ensemble
-        const entries = [];
-        const regex = /Title:\s*(.*?)\s*Artist:\s*(.*?)\s*Album:\s*(.*?)\s*Duration:\s*(\d+)\s*URL:\s*(https?:\/\/\S+)/gs;
+    function parseCSV(text) {
+        const lines = text.split(/\r?\n/).filter(l => l.trim().length > 0);
+        const headers = splitCSVLine(lines[0]);
+        const rows = [];
 
-        let match;
-        while ((match = regex.exec(text)) !== null) {
-            entries.push({
-                title: match[1].trim(),
-                artist: match[2].trim(),
-                album: match[3].trim(),
-                duration: parseInt(match[4], 10),
-                url: match[5].trim()
+        for (let i = 1; i < lines.length; i++) {
+            const values = splitCSVLine(lines[i]);
+            if (values.length === 1 && values[0] === "") continue;
+            const row = {};
+            headers.forEach((h, idx) => {
+                row[h.trim()] = (values[idx] || "").trim();
             });
+            rows.push(row);
         }
-        return entries;
+        return rows;
     }
 
-    function updateProgressBar(current, total) {
-        const percent = total === 0 ? 0 : Math.round((current / total) * 100);
-        document.getElementById("progressBar").style.width = percent + "%";
-        document.getElementById("bulkStatus").textContent = `${current} / ${total} traité(s) (${percent}%)`;
+    function splitCSVLine(line) {
+        const result = [];
+        let current = "";
+        let inQuotes = false;
+
+        for (let i = 0; i < line.length; i++) {
+            const char = line[i];
+
+            if (inQuotes) {
+                if (char === '"') {
+                    if (line[i + 1] === '"') {
+                        current += '"';
+                        i++;
+                    } else {
+                        inQuotes = false;
+                    }
+                } else {
+                    current += char;
+                }
+            } else {
+                if (char === '"') {
+                    inQuotes = true;
+                } else if (char === ",") {
+                    result.push(current);
+                    current = "";
+                } else {
+                    current += char;
+                }
+            }
+        }
+        result.push(current);
+        return result;
     }
 
     function logBulk(message) {
-        const li = document.createElement("li");
-        li.textContent = message;
-        document.getElementById("bulkLog").appendChild(li);
+        const log = document.getElementById("bulkLog");
+        const line = document.createElement("div");
+        line.textContent = message;
+        log.appendChild(line);
+        log.scrollTop = log.scrollHeight;
+    }
+
+    function updateBulkProgress(current, total) {
+        const progress = document.getElementById("bulkProgress");
+        const text = document.getElementById("bulkProgressText");
+        const percent = Math.round((current / total) * 100);
+        progress.value = percent;
+        text.textContent = `${current} / ${total} (${percent}%)`;
     }
 
     function cancelBulkImport() {
-        bulkImportCancelled = true;
-        document.getElementById("cancelBtn").disabled = true;
-        logBulk("⏹️ Annulation demandée...");
+        bulkCancelled = true;
+        logBulk("⚠️ Annulation demandée...");
     }
 
     async function startBulkImport() {
         const fileInput = document.getElementById("csvFile");
-        const file = fileInput.files[0];
         const bulkLog = document.getElementById("bulkLog");
+        const progressWrapper = document.getElementById("bulkProgressWrapper");
+        const cancelBtn = document.getElementById("cancelBtn");
+
         bulkLog.innerHTML = "";
-        document.getElementById("progressBar").style.width = "0%";
+        bulkCancelled = false;
 
-        if (!file) {
-            alert("Sélectionne un fichier CSV d'abord.");
+        if (!addonBaseUrl) {
+            logBulk("❌ Charge d'abord un addon Eclipse (section 2).");
             return;
         }
 
+        if (fileInput.files.length === 0) {
+            logBulk("❌ Merci de sélectionner un fichier CSV.");
+            return;
+        }
+
+        const file = fileInput.files[0];
         const text = await file.text();
-        const entries = parseVibesCSV(text);
+        const rows = parseCSV(text);
 
-        if (entries.length === 0) {
-            alert("Aucune entrée détectée dans le fichier. Vérifie le format.");
+        if (rows.length === 0) {
+            logBulk("❌ Aucune ligne trouvée dans le CSV.");
             return;
         }
 
-        bulkImportCancelled = false;
-        document.getElementById("cancelBtn").disabled = false;
+        progressWrapper.style.display = "block";
+        cancelBtn.style.display = "inline-block";
+        updateBulkProgress(0, rows.length);
 
-        try {
-            // On charge le fichier JSON UNE fois, et on le garde en mémoire tout le long
-            // pour éviter de refaire un GET à chaque itération et minimiser les conflits de SHA.
-            let { content, sha } = await getFile();
+        logBulk(`Import de ${rows.length} musiques...`);
 
-            let addedCount = 0;
-            let skippedCount = 0;
-            let errorCount = 0;
+        // On récupère le JSON une seule fois au début pour vérifier les doublons localement,
+        // mais on relit/réécrit à chaque ajout pour éviter les conflits de sha.
+        let processed = 0;
+        let added = 0;
+        let skipped = 0;
+        let failed = 0;
 
-            for (let i = 0; i < entries.length; i++) {
-                if (bulkImportCancelled) {
-                    logBulk(`⏹️ Import annulé après ${i} entrée(s) traitée(s).`);
-                    break;
-                }
+        for (const row of rows) {
+            if (bulkCancelled) {
+                logBulk("🛑 Import annulé par l'utilisateur.");
+                break;
+            }
 
-                const entry = entries[i];
-                updateProgressBar(i, entries.length);
+            const title = (row["Title"] || "").trim();
+            const artist = (row["Artist"] || "").trim();
+            const sourceUrl = (row["URL"] || "").trim();
 
-                if (isDuplicate(content.items, entry.title, entry.artist)) {
-                    logBulk(`⏭️ Ignoré (doublon) : ${entry.title} - ${entry.artist}`);
-                    skippedCount++;
+            processed++;
+
+            if (!title || !artist) {
+                logBulk(`⚠️ Ligne ignorée (titre/artiste manquant) : ${JSON.stringify(row)}`);
+                skipped++;
+                updateBulkProgress(processed, rows.length);
+                continue;
+            }
+
+            try {
+                // Vérification anti-doublon avant de faire tout le travail
+                const { json } = await getFileData();
+                if (isDuplicate(json, title, artist)) {
+                    logBulk(`⏭️ Doublon ignoré : "${title}" - "${artist}"`);
+                    skipped++;
+                    updateBulkProgress(processed, rows.length);
                     continue;
                 }
 
-                try {
-                    content.items.push({
-                        song: entry.title,
-                        artist: entry.artist,
-                        url: entry.url
-                    });
+                logBulk(`🔎 Recherche de "${title}" - "${artist}"...`);
+                const searchRes = await fetch(CORS_PROXY + `${addonBaseUrl}/search?q=${encodeURIComponent(title + " " + artist)}`);
+                if (!searchRes.ok) throw new Error("Recherche échouée (status " + searchRes.status + ")");
+                const searchData = await searchRes.json();
+                const tracks = searchData.tracks || [];
 
-                    const result = await updateFile(content, sha, `Import CSV: ${entry.title} - ${entry.artist}`);
-                    sha = result.content.sha; // met à jour le SHA pour la prochaine itération
-
-                    logBulk(`✅ Ajouté : ${entry.title} - ${entry.artist}`);
-                    addedCount++;
-                } catch (err) {
-                    logBulk(`❌ Erreur pour "${entry.title} - ${entry.artist}" : ${err.message}`);
-                    errorCount++;
-                    // On enlève l'entrée du contenu local si l'upload a échoué, pour rester cohérent
-                    content.items.pop();
+                if (tracks.length === 0) {
+                    logBulk(`❌ Aucun résultat trouvé pour "${title}" - "${artist}"`);
+                    failed++;
+                    updateBulkProgress(processed, rows.length);
+                    continue;
                 }
+
+                const bestMatch = tracks[0];
+
+                logBulk(`🔗 Résolution du stream pour "${bestMatch.title}"...`);
+                const streamUrl = await resolveStreamUrl(bestMatch.id);
+
+                logBulk(`⬆️ Upload sur Catbox...`);
+                const catboxUrl = await uploadCatboxByUrl(streamUrl);
+
+                logBulk(`💾 Ajout au JSON...`);
+                await addEntry(title, artist, catboxUrl);
+
+                logBulk(`✅ Ajouté : "${title}" - "${artist}"`);
+                added++;
+            } catch (err) {
+                logBulk(`❌ Erreur pour "${title}" - "${artist}" : ${err.message}`);
+                failed++;
             }
 
-            updateProgressBar(entries.length, entries.length);
-            if (!bulkImportCancelled) {
-                logBulk(`🎉 Terminé. ${addedCount} ajoutée(s), ${skippedCount} doublon(s) ignoré(s), ${errorCount} erreur(s).`);
-            }
-        } catch (err) {
-            logBulk("❌ Erreur fatale : " + err.message);
-            console.error(err);
-        } finally {
-            document.getElementById("cancelBtn").disabled = true;
+            updateBulkProgress(processed, rows.length);
         }
+
+        cancelBtn.style.display = "none";
+        logBulk(`--- Import terminé : ${added} ajoutés, ${skipped} ignorés, ${failed} échoués ---`);
     }
 </script>
 
