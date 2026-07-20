@@ -40,7 +40,7 @@
             const formData = new FormData();
             formData.append("file", file);
 
-            const response = await fetch("https://0807.st/upload", {
+            const response = await fetch("https://proxy.corsfix.com/?https://0807.st/upload", {
                 method: "POST",
                 body: formData
             });
