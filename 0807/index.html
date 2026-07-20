@@ -1,0 +1,660 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8">
+<title>Lossless Library Editor</title>
+</head>
+<body>
+
+<h1>Lossless Library Editor</h1>
+
+<h2>Paramètres</h2>
+<button onclick="clearSavedSettings()">🗑️ Effacer token GitHub + paramètres sauvegardés</button>
+<p id="settingsStatus"></p>
+
+<hr>
+
+<h2>1. Ajout manuel</h2>
+<label>Titre : <input id="song" type="text"></label><br><br>
+<label>Artiste : <input id="artist" type="text"></label><br><br>
+<label>URL FLAC : <input id="url" type="text"></label><br><br>
+<label>Ou upload fichier FLAC : <input id="fileInput" type="file" accept=".flac"></label><br><br>
+<button onclick="submitEntry()">Envoyer</button>
+
+<p id="status"></p>
+
+<hr>
+
+<h2>2. Auto-download via API QobuzDL</h2>
+<label>URL de l'API QobuzDL (ex: https://qobuz2.kennyy.com.br/api) : 
+  <input id="qobuzApiUrl" type="text" size="50" placeholder="https://qobuz2.kennyy.com.br/api">
+</label>
+<button onclick="saveApiUrl()">💾 Sauvegarder l'URL</button>
+<label style="margin-left:20px;">Qualité (ex: 27 pour FLAC 24-bit) : 
+  <input id="quality" type="number" value="27" min="5" max="27" style="width:60px;">
+</label>
+<p id="qobuzStatus"></p>
+
+<br>
+<label>Recherche : <input id="searchQuery" type="text"></label>
+<button onclick="searchQobuz()">Chercher</button>
+
+<div id="searchResults"></div>
+
+<p id="autoStatus"></p>
+
+<hr>
+
+<h2>3. Bulk import depuis CSV</h2>
+<p>Format attendu : <code>Title,Artist,Album,Duration,URL</code> (utilise l'API QobuzDL configurée ci-dessus)</p>
+<input id="csvFile" type="file" accept=".csv">
+<button onclick="startBulkImport()">Importer</button>
+<button onclick="cancelBulkImport()" id="cancelBtn" style="display:none;">❌ Annuler</button>
+
+<div id="bulkProgressWrapper" style="display:none; margin-top:10px;">
+    <progress id="bulkProgress" value="0" max="100" style="width:300px;"></progress>
+    <span id="bulkProgressText"></span>
+</div>
+
+<div id="bulkLog" style="margin-top:10px; max-height:300px; overflow-y:auto; border:1px solid #ccc; padding:5px;"></div>
+
+<script>
+    const owner = "Biskwuit";
+    const repo = "Lossless-Library";
+    const path = "music.json";
+    const branch = "main";
+
+    const CORS_PROXY = "https://cors.zizicabane.stream/";
+
+    const LS_TOKEN_KEY = "eclipse_github_token";
+    const LS_API_URL_KEY = "qobuz_api_url";
+    const LS_QUALITY_KEY = "qobuz_quality";
+
+    let githubToken = localStorage.getItem(LS_TOKEN_KEY) || "";
+    let bulkCancelled = false;
+
+    // ---------- Init ----------
+
+    window.addEventListener("DOMContentLoaded", () => {
+        const savedApiUrl = localStorage.getItem(LS_API_URL_KEY);
+        if (savedApiUrl) {
+            document.getElementById("qobuzApiUrl").value = savedApiUrl;
+        }
+        const savedQuality = localStorage.getItem(LS_QUALITY_KEY);
+        if (savedQuality) {
+            document.getElementById("quality").value = savedQuality;
+        }
+    });
+
+    // ---------- Token / settings ----------
+
+    function getToken() {
+        if (!githubToken) {
+            githubToken = prompt("Entre ton GitHub Personal Access Token :");
+            if (githubToken) {
+                localStorage.setItem(LS_TOKEN_KEY, githubToken);
+            }
+        }
+        return githubToken;
+    }
+
+    function clearSavedSettings() {
+        localStorage.removeItem(LS_TOKEN_KEY);
+        localStorage.removeItem(LS_API_URL_KEY);
+        localStorage.removeItem(LS_QUALITY_KEY);
+        githubToken = "";
+        document.getElementById("qobuzApiUrl").value = "";
+        document.getElementById("settingsStatus").textContent = "Token et paramètres effacés du cache local.";
+    }
+
+    function saveApiUrl() {
+        const url = document.getElementById("qobuzApiUrl").value.trim();
+        const quality = document.getElementById("quality").value.trim();
+        if (!url) {
+            document.getElementById("qobuzStatus").textContent = "Veuillez entrer une URL.";
+            return;
+        }
+        localStorage.setItem(LS_API_URL_KEY, url);
+        localStorage.setItem(LS_QUALITY_KEY, quality);
+        document.getElementById("qobuzStatus").textContent = "URL sauvegardée.";
+    }
+
+    function getApiUrl() {
+        let url = document.getElementById("qobuzApiUrl").value.trim();
+        if (!url) {
+            url = localStorage.getItem(LS_API_URL_KEY);
+        }
+        if (!url) throw new Error("Aucune URL d'API QobuzDL configurée. Allez dans la section 2 pour la définir.");
+        url = url.replace(/\/+$/, "");
+        return url;
+    }
+
+    function getQuality() {
+        const val = parseInt(document.getElementById("quality").value, 10);
+        if (isNaN(val) || val < 5 || val > 27) {
+            throw new Error("Valeur de qualité invalide (doit être entre 5 et 27).");
+        }
+        return val;
+    }
+
+    // ---------- GitHub helpers ----------
+
+    async function getFileData() {
+        const token = getToken();
+        const res = await fetch(
+            `https://api.github.com/repos/${owner}/${repo}/contents/${path}?ref=${branch}`,
+            { headers: { Authorization: `token ${token}` } }
+        );
+        if (!res.ok) throw new Error("Erreur lors de la lecture du fichier JSON (status " + res.status + ")");
+        const data = await res.json();
+        const content = decodeURIComponent(escape(atob(data.content)));
+        return { json: JSON.parse(content), sha: data.sha };
+    }
+
+    async function saveFileDataWithSha(json, sha, commitMessage) {
+        const token = getToken();
+        const content = btoa(unescape(encodeURIComponent(JSON.stringify(json, null, 2))));
+        const res = await fetch(
+            `https://api.github.com/repos/${owner}/${repo}/contents/${path}`,
+            {
+                method: "PUT",
+                headers: {
+                    Authorization: `token ${token}`,
+                    "Content-Type": "application/json"
+                },
+                body: JSON.stringify({
+                    message: commitMessage || "Ajout d'une musique",
+                    content: content,
+                    sha: sha,
+                    branch: branch
+                })
+            }
+        );
+        if (!res.ok) {
+            const errText = await res.text();
+            throw new Error("Erreur lors de l'écriture du fichier JSON : " + errText);
+        }
+        const responseData = await res.json();
+        return responseData.content.sha; // nouveau SHA
+    }
+
+    function isDuplicate(json, title, artist) {
+        return json.items.some(item =>
+            item.song.trim().toLowerCase() === title.trim().toLowerCase() &&
+            item.artist.trim().toLowerCase() === artist.trim().toLowerCase()
+        );
+    }
+
+    async function addEntry(title, artist, fileUrl) {
+        const { json, sha } = await getFileData();
+
+        if (isDuplicate(json, title, artist)) {
+            throw new Error(`Doublon : "${title}" - "${artist}" existe déjà.`);
+        }
+
+        json.items.push({
+            song: title,
+            artist: artist,
+            url: fileUrl
+        });
+
+        await saveFileDataWithSha(json, sha, `Ajout : ${title} - ${artist}`);
+    }
+
+    // ---------- Helpers crypto (SHA-256) et PoW pour 0807.st ----------
+
+    async function sha256(message) {
+        const msgBuffer = new TextEncoder().encode(message);
+        const hashBuffer = await crypto.subtle.digest("SHA-256", msgBuffer);
+        const hashArray = Array.from(new Uint8Array(hashBuffer));
+        return hashArray.map(b => b.toString(16).padStart(2, "0")).join("");
+    }
+
+    /**
+     * Vérifie si le hash hexadécimal a au moins 'bits' bits de poids fort à zéro.
+     * On lit le premier octet du hash (en binaire) et on compte les bits nuls en tête.
+     */
+    function startsWithBits(hashHex, bits) {
+        if (bits === 0) return true;
+        let zeroBits = 0;
+        for (let i = 0; i < hashHex.length; i++) {
+            const nibble = parseInt(hashHex[i], 16);
+            for (let shift = 3; shift >= 0; shift--) {
+                if ((nibble & (1 << shift)) === 0) {
+                    zeroBits++;
+                    if (zeroBits >= bits) return true;
+                } else {
+                    return false;
+                }
+            }
+        }
+        return zeroBits >= bits;
+    }
+
+    async function minePow(id, bits) {
+        let nonce = 0;
+        // On fait des petits lots de 1000 itérations pour ne pas bloquer l'UI
+        const BATCH_SIZE = 1000;
+        while (true) {
+            for (let i = 0; i < BATCH_SIZE; i++) {
+                const hash = await sha256(id + "." + nonce);
+                if (startsWithBits(hash, bits)) {
+                    return nonce;
+                }
+                nonce++;
+            }
+            // Laisser l'UI respirer
+            await new Promise(r => setTimeout(r, 0));
+        }
+    }
+
+    /**
+     * Télécharge un fichier en tant que Blob depuis une URL (via le proxy CORS).
+     */
+    async function downloadAsBlob(url) {
+        const res = await fetch(CORS_PROXY + url);
+        if (!res.ok) throw new Error(`Échec du téléchargement du fichier (status ${res.status})`);
+        return await res.blob();
+    }
+
+    /**
+     * Upload un File ou Blob vers 0807.st avec proof‑of‑work.
+     * Retourne l'URL publique.
+     */
+    async function upload0807File(file) {
+        // Étape 1 : récupérer le défi POW
+        const powResp = await fetch(CORS_PROXY + "https://0807.st/pow");
+        if (!powResp.ok) {
+            const errText = await powResp.text();
+            throw new Error("Erreur lors de la récupération du défi POW : " + errText);
+        }
+        const powData = await powResp.json();
+
+        // Étape 2 : miner le nonce
+        const nonce = await minePow(powData.id, powData.bits);
+
+        // Étape 3 : upload avec les champs POW
+        const formData = new FormData();
+        formData.append("file", file);
+        formData.append("pow_id", powData.id);
+        formData.append("pow_ts", powData.ts);
+        formData.append("pow_bits", powData.bits);
+        formData.append("pow_sig", powData.sig);
+        formData.append("pow_nonce", nonce);
+
+        const res = await fetch(CORS_PROXY + "https://0807.st/upload", {
+            method: "POST",
+            body: formData
+        });
+
+        if (!res.ok) {
+            const errText = await res.text();
+            throw new Error("Erreur lors de l'upload sur 0807.st : " + errText);
+        }
+
+        const data = await res.json();
+        if (!data.url) {
+            throw new Error("Réponse inattendue de 0807.st : " + JSON.stringify(data));
+        }
+        return data.url;
+    }
+
+    /**
+     * Télécharge un fichier depuis une URL puis l'upload sur 0807.st.
+     */
+    async function upload0807FromUrl(url) {
+        const blob = await downloadAsBlob(url);
+        return await upload0807File(blob);
+    }
+
+    // ---------- Ajout manuel ----------
+
+    async function submitEntry() {
+        const status = document.getElementById("status");
+        const title = document.getElementById("song").value.trim();
+        const artist = document.getElementById("artist").value.trim();
+        let fileUrl = document.getElementById("url").value.trim();
+        const fileInput = document.getElementById("fileInput");
+
+        if (!title || !artist) {
+            status.textContent = "Titre et artiste requis.";
+            return;
+        }
+
+        try {
+            if (fileInput.files.length > 0) {
+                status.textContent = "Upload du fichier sur 0807.st...";
+                fileUrl = await upload0807File(fileInput.files[0]);
+            }
+
+            if (!fileUrl) {
+                status.textContent = "Aucune URL ni fichier fourni.";
+                return;
+            }
+
+            status.textContent = "Ajout au JSON...";
+            await addEntry(title, artist, fileUrl);
+
+            status.textContent = `Ajouté avec succès : ${title} - ${artist}`;
+            document.getElementById("song").value = "";
+            document.getElementById("artist").value = "";
+            document.getElementById("url").value = "";
+            fileInput.value = "";
+        } catch (err) {
+            status.textContent = "Erreur : " + err.message;
+            console.error(err);
+        }
+    }
+
+    // ---------- API QobuzDL ----------
+
+    async function getDownloadUrl(trackId) {
+        const apiUrl = getApiUrl();
+        const quality = getQuality();
+        const res = await fetch(CORS_PROXY + `${apiUrl}/download-music?track_id=${trackId}&quality=${quality}`);
+        if (!res.ok) throw new Error("Échec de récupération du lien de téléchargement (status " + res.status + ")");
+        const json = await res.json();
+        if (!json.success) throw new Error("API QobuzDL a répondu avec succès=false");
+        if (!json.data || !json.data.url) throw new Error("URL de téléchargement absente de la réponse");
+        return json.data.url;
+    }
+
+    async function searchQobuzTracks(query) {
+        const apiUrl = getApiUrl();
+        const res = await fetch(CORS_PROXY + `${apiUrl}/get-music?q=${encodeURIComponent(query)}&offset=0&limit=20`);
+        if (!res.ok) throw new Error("Erreur lors de la recherche (status " + res.status + ")");
+        const json = await res.json();
+        if (!json.success) throw new Error("API QobuzDL a répondu avec succès=false");
+        return (json.data && json.data.tracks && json.data.tracks.items) || [];
+    }
+
+    async function getFirstTrack(query) {
+        const tracks = await searchQobuzTracks(query);
+        if (!tracks.length) return null;
+        const t = tracks[0];
+        return {
+            id: t.id,
+            title: t.title,
+            artist: (t.performer && t.performer.name) || t.artist || "Artiste inconnu"
+        };
+    }
+
+    // ---------- Section 2 : recherche et ajout ponctuel ----------
+
+    async function searchQobuz() {
+        const resultsDiv = document.getElementById("searchResults");
+        const query = document.getElementById("searchQuery").value.trim();
+
+        try {
+            getApiUrl(); // juste pour valider
+        } catch (e) {
+            resultsDiv.innerHTML = `<p>${e.message}</p>`;
+            return;
+        }
+
+        if (!query) {
+            resultsDiv.innerHTML = "<p>Entre une recherche.</p>";
+            return;
+        }
+
+        resultsDiv.innerHTML = "<p>Recherche en cours...</p>";
+
+        try {
+            const tracks = await searchQobuzTracks(query);
+
+            if (tracks.length === 0) {
+                resultsDiv.innerHTML = "<p>Aucun résultat.</p>";
+                return;
+            }
+
+            resultsDiv.innerHTML = tracks.map(t => `
+                <div style="border:1px solid #ccc; padding:5px; margin:5px 0;">
+                    <strong>${t.title}</strong> - ${(t.performer && t.performer.name) || t.artist || "Artiste inconnu"}
+                    <button
+                        data-id="${t.id}"
+                        data-title="${encodeURIComponent(t.title)}"
+                        data-artist="${encodeURIComponent((t.performer && t.performer.name) || t.artist || 'Artiste inconnu')}"
+                        onclick="autoAddFromQobuz(this)">
+                        Ajouter
+                    </button>
+                </div>
+            `).join("");
+        } catch (err) {
+            resultsDiv.innerHTML = "<p>Erreur : " + err.message + "</p>";
+            console.error(err);
+        }
+    }
+
+    async function autoAddFromQobuz(button) {
+        const id = button.getAttribute("data-id");
+        const title = decodeURIComponent(button.getAttribute("data-title"));
+        const artist = decodeURIComponent(button.getAttribute("data-artist"));
+        const autoStatus = document.getElementById("autoStatus");
+
+        try {
+            autoStatus.textContent = "Récupération du lien de téléchargement...";
+            const downloadUrl = await getDownloadUrl(id);
+
+            autoStatus.textContent = "Téléchargement puis upload sur 0807.st...";
+            const publicUrl = await upload0807FromUrl(downloadUrl);
+
+            autoStatus.textContent = "Ajout au JSON...";
+            await addEntry(title, artist, publicUrl);
+
+            autoStatus.textContent = `Ajouté avec succès : ${title} - ${artist}`;
+        } catch (err) {
+            autoStatus.textContent = "Erreur : " + err.message;
+            console.error(err);
+        }
+    }
+
+    // ---------- Bulk import CSV ----------
+
+    function parseCSV(text) {
+        const lines = text.split(/\r?\n/).filter(l => l.trim().length > 0);
+        const headers = splitCSVLine(lines[0]);
+        const rows = [];
+
+        for (let i = 1; i < lines.length; i++) {
+            const values = splitCSVLine(lines[i]);
+            if (values.length === 1 && values[0] === "") continue;
+            const row = {};
+            headers.forEach((h, idx) => {
+                row[h.trim()] = (values[idx] || "").trim();
+            });
+            rows.push(row);
+        }
+        return rows;
+    }
+
+    function splitCSVLine(line) {
+        const result = [];
+        let current = "";
+        let inQuotes = false;
+
+        for (let i = 0; i < line.length; i++) {
+            const char = line[i];
+
+            if (inQuotes) {
+                if (char === '"') {
+                    if (line[i + 1] === '"') {
+                        current += '"';
+                        i++;
+                    } else {
+                        inQuotes = false;
+                    }
+                } else {
+                    current += char;
+                }
+            } else {
+                if (char === '"') {
+                    inQuotes = true;
+                } else if (char === ",") {
+                    result.push(current);
+                    current = "";
+                } else {
+                    current += char;
+                }
+            }
+        }
+        result.push(current);
+        return result;
+    }
+
+    function logBulk(message) {
+        const log = document.getElementById("bulkLog");
+        const line = document.createElement("div");
+        line.textContent = message;
+        log.appendChild(line);
+        log.scrollTop = log.scrollHeight;
+    }
+
+    function updateBulkProgress(current, total) {
+        const progress = document.getElementById("bulkProgress");
+        const text = document.getElementById("bulkProgressText");
+        const percent = Math.round((current / total) * 100);
+        progress.value = percent;
+        text.textContent = `${current} / ${total} (${percent}%)`;
+    }
+
+    function cancelBulkImport() {
+        bulkCancelled = true;
+        logBulk("⚠️ Annulation demandée...");
+    }
+
+    async function startBulkImport() {
+        const fileInput = document.getElementById("csvFile");
+        const bulkLog = document.getElementById("bulkLog");
+        const progressWrapper = document.getElementById("bulkProgressWrapper");
+        const cancelBtn = document.getElementById("cancelBtn");
+
+        bulkLog.innerHTML = "";
+        bulkCancelled = false;
+
+        try {
+            getApiUrl();
+            getQuality();
+        } catch (e) {
+            logBulk(`❌ ${e.message}`);
+            return;
+        }
+
+        if (fileInput.files.length === 0) {
+            logBulk("❌ Merci de sélectionner un fichier CSV.");
+            return;
+        }
+
+        const file = fileInput.files[0];
+        const text = await file.text();
+        const rows = parseCSV(text);
+
+        if (rows.length === 0) {
+            logBulk("❌ Aucune ligne trouvée dans le CSV.");
+            return;
+        }
+
+        progressWrapper.style.display = "block";
+        cancelBtn.style.display = "inline-block";
+        updateBulkProgress(0, rows.length);
+
+        logBulk(`📦 Import de ${rows.length} musiques...`);
+        logBulk(`📖 Lecture du fichier JSON depuis GitHub...`);
+
+        let fileData;
+        try {
+            fileData = await getFileData();
+        } catch (err) {
+            logBulk(`❌ Impossible de lire music.json : ${err.message}`);
+            cancelBtn.style.display = "none";
+            return;
+        }
+
+        let currentJson = fileData.json;
+        let currentSha = fileData.sha;
+        let processed = 0;
+        let added = 0;
+        let skipped = 0;
+        let failed = 0;
+
+        logBulk(`✅ Fichier lu (SHA: ${currentSha.substring(0, 7)}...)`);
+
+        for (const row of rows) {
+            if (bulkCancelled) {
+                logBulk("🛑 Import annulé par l'utilisateur.");
+                break;
+            }
+
+            const title = (row["Title"] || "").trim();
+            const artist = (row["Artist"] || "").trim();
+            processed++;
+
+            if (!title || !artist) {
+                logBulk(`⚠️ Ligne ${processed} ignorée (titre/artiste manquant)`);
+                skipped++;
+                updateBulkProgress(processed, rows.length);
+                continue;
+            }
+
+            try {
+                if (isDuplicate(currentJson, title, artist)) {
+                    logBulk(`⏭️ Doublon ignoré : "${title}" - "${artist}"`);
+                    skipped++;
+                    updateBulkProgress(processed, rows.length);
+                    continue;
+                }
+
+                logBulk(`🔎 [${processed}] Recherche Qobuz : "${title}" "${artist}"`);
+                const track = await getFirstTrack(`${title} ${artist}`);
+
+                if (!track) {
+                    logBulk(`❌ [${processed}] Aucun résultat Qobuz pour "${title}" - "${artist}"`);
+                    failed++;
+                    updateBulkProgress(processed, rows.length);
+                    continue;
+                }
+
+                logBulk(`🎵 [${processed}] Trouvé : "${track.title}" (id: ${track.id})`);
+                logBulk(`⬇️ [${processed}] Récupération du lien FLAC...`);
+                const downloadUrl = await getDownloadUrl(track.id);
+
+                logBulk(`⬆️ [${processed}] Upload sur 0807.st...`);
+                const publicUrl = await upload0807FromUrl(downloadUrl);
+
+                currentJson.items.push({
+                    song: title,
+                    artist: artist,
+                    url: publicUrl
+                });
+
+                logBulk(`💾 [${processed}] Écriture sur GitHub...`);
+                const newSha = await saveFileDataWithSha(currentJson, currentSha, `Ajout bulk : ${title} - ${artist}`);
+                currentSha = newSha;
+
+                logBulk(`✅ [${processed}] Ajouté : "${title}" - "${artist}" (SHA: ${newSha.substring(0, 7)}...)`);
+                added++;
+            } catch (err) {
+                logBulk(`❌ [${processed}] Erreur pour "${title}" - "${artist}" : ${err.message}`);
+                if (err.message.includes("409") || err.message.includes("does not match")) {
+                    try {
+                        logBulk(`🔄 Resynchronisation du SHA...`);
+                        const refreshed = await getFileData();
+                        currentJson = refreshed.json;
+                        currentSha = refreshed.sha;
+                        logBulk(`✅ Resynchronisé (SHA: ${currentSha.substring(0, 7)}...)`);
+                    } catch (refreshErr) {
+                        logBulk(`❌ Échec resynchronisation : ${refreshErr.message}`);
+                    }
+                }
+                failed++;
+            }
+
+            updateBulkProgress(processed, rows.length);
+        }
+
+        cancelBtn.style.display = "none";
+        logBulk(`--- Import terminé : ${added} ajoutés, ${skipped} ignorés, ${failed} échoués ---`);
+    }
+</script>
+
+</body>
+</html>
