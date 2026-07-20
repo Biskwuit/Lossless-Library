@@ -13,8 +13,8 @@
     <label>Artiste :</label><br>
     <input type="text" id="artist"><br><br>
 
-    <label>URL du fichier :</label><br>
-    <input type="text" id="url"><br><br>
+    <label>Fichier FLAC :</label><br>
+    <input type="file" id="fileInput" accept=".flac"><br><br>
 
     <button onclick="ajouterEntree()">Send</button>
 
@@ -27,13 +27,37 @@
     <div id="liste"></div>
 
     <script>
-        // Configuration - à adapter
+        // Configuration du repo
         const owner = "Biskwuit";
         const repo = "Lossless-Library";
         const path = "music.json";
         const branch = "main";
 
         let token = prompt("Entre ton GitHub Personal Access Token :");
+
+        // Upload le fichier sur Catbox et retourne l'URL
+        async function uploadCatbox(file) {
+            const formData = new FormData();
+            formData.append("reqtype", "fileupload");
+            formData.append("fileToUpload", file);
+
+            const response = await fetch("https://catbox.moe/user/api.php", {
+                method: "POST",
+                body: formData
+            });
+
+            if (!response.ok) {
+                throw new Error("Erreur lors de l'upload sur Catbox");
+            }
+
+            const url = await response.text();
+
+            if (!url.startsWith("http")) {
+                throw new Error("Réponse Catbox invalide : " + url);
+            }
+
+            return url.trim();
+        }
 
         // Charge le JSON et retourne { data, sha }
         async function getFichier() {
@@ -86,20 +110,23 @@
             }
         }
 
-        // Ajoute une entrée
+        // Ajoute une entrée (avec upload du fichier)
         async function ajouterEntree() {
             const song = document.getElementById("song").value;
             const artist = document.getElementById("artist").value;
-            const url = document.getElementById("url").value;
+            const fileInput = document.getElementById("fileInput");
+            const file = fileInput.files[0];
 
-            if (!song || !artist || !url) {
-                document.getElementById("status").innerText = "Remplis tous les champs !";
+            if (!song || !artist || !file) {
+                document.getElementById("status").innerText = "Remplis tous les champs et choisis un fichier !";
                 return;
             }
 
-            document.getElementById("status").innerText = "Chargement...";
-
             try {
+                document.getElementById("status").innerText = "⬆️ Upload du fichier sur Catbox...";
+                const url = await uploadCatbox(file);
+
+                document.getElementById("status").innerText = "💾 Mise à jour du JSON...";
                 const { data, sha } = await getFichier();
 
                 data.items.push({ song, artist, url });
@@ -109,9 +136,9 @@
                 document.getElementById("status").innerText = "✅ Ajouté avec succès !";
                 document.getElementById("song").value = "";
                 document.getElementById("artist").value = "";
-                document.getElementById("url").value = "";
+                fileInput.value = "";
 
-                chargerListe(); // rafraîchit la liste automatiquement
+                chargerListe();
 
             } catch (error) {
                 document.getElementById("status").innerText = "❌ Erreur : " + error.message;
@@ -174,7 +201,6 @@
             }
         }
 
-        // Charge la liste au démarrage de la page
         chargerListe();
     </script>
 
