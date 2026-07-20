@@ -38,6 +38,27 @@
 
 <p id="autoStatus"></p>
 
+<hr>
+
+<h2>3. Import en masse (CSV)</h2>
+<p>Format attendu (comme un export Vibes) :</p>
+<pre>Title: Nom de la chanson
+Artist: Nom de l'artiste
+Album: 
+Duration: 135
+URL: https://music.youtube.com/watch?v=xxxx</pre>
+
+<label>Fichier CSV : <input id="csvFile" type="file" accept=".csv,.txt"></label><br><br>
+
+<button onclick="startBulkImport()">Lancer l'import</button>
+<button onclick="cancelBulkImport()" id="cancelBtn" disabled>Annuler</button>
+
+<div style="margin-top:10px; width:400px; border:1px solid #000;">
+    <div id="progressBar" style="height:20px; width:0%; background:green;"></div>
+</div>
+<p id="bulkStatus"></p>
+<ul id="bulkLog"></ul>
+
 <script>
     const owner = "Biskwuit";
     const repo = "Lossless-Library";
@@ -51,6 +72,7 @@
 
     let githubToken = localStorage.getItem(LS_TOKEN_KEY) || "";
     let addonBaseUrl = "";
+    let bulkImportCancelled = false;
 
     // ---------- Init : restaure les valeurs sauvegardées ----------
 
@@ -116,8 +138,19 @@
         return res.json();
     }
 
+    function isDuplicate(items, song, artist) {
+        const normalize = s => s.trim().toLowerCase();
+        return items.some(item =>
+            normalize(item.song) === normalize(song) &&
+            normalize(item.artist) === normalize(artist)
+        );
+    }
+
     async function addEntry(song, artist, url) {
         const { content, sha } = await getFile();
+        if (isDuplicate(content.items, song, artist)) {
+            throw new Error("DUPLICATE");
+        }
         content.items.push({ song, artist, url });
         await updateFile(content, sha, `Ajout: ${song} - ${artist}`);
     }
@@ -192,7 +225,11 @@
             document.getElementById("url").value = "";
             document.getElementById("fileInput").value = "";
         } catch (err) {
-            status.textContent = "Erreur : " + err.message;
+            if (err.message === "DUPLICATE") {
+                status.textContent = "Cette chanson existe déjà dans la bibliothèque.";
+            } else {
+                status.textContent = "Erreur : " + err.message;
+            }
             console.error(err);
         }
     }
@@ -290,8 +327,129 @@
 
             autoStatus.textContent = `Ajouté avec succès : ${title} - ${artist}`;
         } catch (err) {
-            autoStatus.textContent = "Erreur : " + err.message;
+            if (err.message === "DUPLICATE") {
+                autoStatus.textContent = "Cette chanson existe déjà dans la bibliothèque.";
+            } else {
+                autoStatus.textContent = "Erreur : " + err.message;
+            }
             console.error(err);
+        }
+    }
+
+    // ---------- Bulk CSV import ----------
+
+    function parseVibesCSV(text) {
+        // Format: blocs "Title: ...\nArtist: ...\nAlbum: ...\nDuration: ...\nURL: ..." collés ensemble
+        const entries = [];
+        const regex = /Title:\s*(.*?)\s*Artist:\s*(.*?)\s*Album:\s*(.*?)\s*Duration:\s*(\d+)\s*URL:\s*(https?:\/\/\S+)/gs;
+
+        let match;
+        while ((match = regex.exec(text)) !== null) {
+            entries.push({
+                title: match[1].trim(),
+                artist: match[2].trim(),
+                album: match[3].trim(),
+                duration: parseInt(match[4], 10),
+                url: match[5].trim()
+            });
+        }
+        return entries;
+    }
+
+    function updateProgressBar(current, total) {
+        const percent = total === 0 ? 0 : Math.round((current / total) * 100);
+        document.getElementById("progressBar").style.width = percent + "%";
+        document.getElementById("bulkStatus").textContent = `${current} / ${total} traité(s) (${percent}%)`;
+    }
+
+    function logBulk(message) {
+        const li = document.createElement("li");
+        li.textContent = message;
+        document.getElementById("bulkLog").appendChild(li);
+    }
+
+    function cancelBulkImport() {
+        bulkImportCancelled = true;
+        document.getElementById("cancelBtn").disabled = true;
+        logBulk("⏹️ Annulation demandée...");
+    }
+
+    async function startBulkImport() {
+        const fileInput = document.getElementById("csvFile");
+        const file = fileInput.files[0];
+        const bulkLog = document.getElementById("bulkLog");
+        bulkLog.innerHTML = "";
+        document.getElementById("progressBar").style.width = "0%";
+
+        if (!file) {
+            alert("Sélectionne un fichier CSV d'abord.");
+            return;
+        }
+
+        const text = await file.text();
+        const entries = parseVibesCSV(text);
+
+        if (entries.length === 0) {
+            alert("Aucune entrée détectée dans le fichier. Vérifie le format.");
+            return;
+        }
+
+        bulkImportCancelled = false;
+        document.getElementById("cancelBtn").disabled = false;
+
+        try {
+            // On charge le fichier JSON UNE fois, et on le garde en mémoire tout le long
+            // pour éviter de refaire un GET à chaque itération et minimiser les conflits de SHA.
+            let { content, sha } = await getFile();
+
+            let addedCount = 0;
+            let skippedCount = 0;
+            let errorCount = 0;
+
+            for (let i = 0; i < entries.length; i++) {
+                if (bulkImportCancelled) {
+                    logBulk(`⏹️ Import annulé après ${i} entrée(s) traitée(s).`);
+                    break;
+                }
+
+                const entry = entries[i];
+                updateProgressBar(i, entries.length);
+
+                if (isDuplicate(content.items, entry.title, entry.artist)) {
+                    logBulk(`⏭️ Ignoré (doublon) : ${entry.title} - ${entry.artist}`);
+                    skippedCount++;
+                    continue;
+                }
+
+                try {
+                    content.items.push({
+                        song: entry.title,
+                        artist: entry.artist,
+                        url: entry.url
+                    });
+
+                    const result = await updateFile(content, sha, `Import CSV: ${entry.title} - ${entry.artist}`);
+                    sha = result.content.sha; // met à jour le SHA pour la prochaine itération
+
+                    logBulk(`✅ Ajouté : ${entry.title} - ${entry.artist}`);
+                    addedCount++;
+                } catch (err) {
+                    logBulk(`❌ Erreur pour "${entry.title} - ${entry.artist}" : ${err.message}`);
+                    errorCount++;
+                    // On enlève l'entrée du contenu local si l'upload a échoué, pour rester cohérent
+                    content.items.pop();
+                }
+            }
+
+            updateProgressBar(entries.length, entries.length);
+            if (!bulkImportCancelled) {
+                logBulk(`🎉 Terminé. ${addedCount} ajoutée(s), ${skippedCount} doublon(s) ignoré(s), ${errorCount} erreur(s).`);
+            }
+        } catch (err) {
+            logBulk("❌ Erreur fatale : " + err.message);
+            console.error(err);
+        } finally {
+            document.getElementById("cancelBtn").disabled = true;
         }
     }
 </script>
