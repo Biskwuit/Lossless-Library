@@ -8,6 +8,12 @@
 
 <h1>Ajouter une musique</h1>
 
+<h2>Paramètres</h2>
+<button onclick="clearSavedSettings()">🗑️ Effacer token GitHub + URL manifest sauvegardés</button>
+<p id="settingsStatus"></p>
+
+<hr>
+
 <h2>1. Ajout manuel</h2>
 <label>Titre : <input id="song" type="text"></label><br><br>
 <label>Artiste : <input id="artist" type="text"></label><br><br>
@@ -40,14 +46,41 @@
 
     const CORS_PROXY = "https://cors.zizicabane.stream/";
 
-    let githubToken = "";
+    const LS_TOKEN_KEY = "eclipse_github_token";
+    const LS_MANIFEST_KEY = "eclipse_manifest_url";
+
+    let githubToken = localStorage.getItem(LS_TOKEN_KEY) || "";
     let addonBaseUrl = "";
+
+    // ---------- Init : restaure les valeurs sauvegardées ----------
+
+    window.addEventListener("DOMContentLoaded", () => {
+        const savedManifestUrl = localStorage.getItem(LS_MANIFEST_KEY);
+        if (savedManifestUrl) {
+            document.getElementById("manifestUrl").value = savedManifestUrl;
+            addonBaseUrl = savedManifestUrl.replace(/\/manifest\.json\/?$/, "");
+            document.getElementById("manifestStatus").textContent = "URL restaurée depuis le cache local. Clique sur 'Charger l'addon' pour vérifier.";
+        }
+    });
 
     function getToken() {
         if (!githubToken) {
             githubToken = prompt("Entre ton GitHub Personal Access Token :");
+            if (githubToken) {
+                localStorage.setItem(LS_TOKEN_KEY, githubToken);
+            }
         }
         return githubToken;
+    }
+
+    function clearSavedSettings() {
+        localStorage.removeItem(LS_TOKEN_KEY);
+        localStorage.removeItem(LS_MANIFEST_KEY);
+        githubToken = "";
+        addonBaseUrl = "";
+        document.getElementById("manifestUrl").value = "";
+        document.getElementById("settingsStatus").textContent = "Token et URL manifest supprimés du cache local.";
+        document.getElementById("manifestStatus").textContent = "";
     }
 
     // ---------- GitHub JSON helpers ----------
@@ -178,12 +211,13 @@
         try {
             manifestStatus.textContent = "Chargement...";
 
-            // On dérive la base URL en retirant /manifest.json à la fin
             addonBaseUrl = url.replace(/\/manifest\.json\/?$/, "");
 
             const res = await fetch(CORS_PROXY + url);
             if (!res.ok) throw new Error("Impossible de charger le manifest (status " + res.status + ")");
             const manifest = await res.json();
+
+            localStorage.setItem(LS_MANIFEST_KEY, url);
 
             manifestStatus.textContent = `Addon chargé : ${manifest.name} (v${manifest.version})`;
         } catch (err) {
